@@ -1,0 +1,28 @@
+{
+  "name": "threadmap-panel",
+  "version": "0.2.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "build": "vite build && vite build --config vite.userscript.config.ts",
+    "acceptance": "node acceptance/browser.mjs",
+    "readings": "node scripts/build-readings.mjs",
+    "screenshots": "node scripts/screenshots.mjs"
+  },
+  "dependencies": {
+    "preact": "10.29.8"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.0",
+    "@types/web": "0.0.198",
+    "jsdom": "26.0.0",
+    "typescript": "5.7.3",
+    "vite": "6.4.3",
+    "vitest": "3.0.9",
+    "playwright": "1.51.1"
+  },
+  "license": "MIT AND CC-BY-SA-4.0"
+}
