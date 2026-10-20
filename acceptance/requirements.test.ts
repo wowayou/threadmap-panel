@@ -4,7 +4,8 @@
  * 早期“与全部历史比对”模型下的条目已按新模型改写，见 docs/implementation-brief.md。
  */
 import { describe, expect, it } from 'vitest'
-import { buildChain, defaultChainSettings } from '../src/core/chain'
+import { formatText } from '../src/i18n'
+import { buildChain, defaultChainSettings, siblingsOf } from '../src/core/chain'
 import { extractPhrases, htmlToText, mergePosts, normalizePost } from '../src/core/phrases'
 import type { Post } from '../src/core/types'
 
@@ -47,7 +48,8 @@ describe('验收：接龙判断', () => {
   })
   it('#24 同音接 #21，与 #23 构成分叉；平台 Reply 事实保留', () => {
     const chain = buildChain(core, settings, [], full(core))
-    expect(at(chain, 24)).toMatchObject({ parentId: 10021, status: 'fork', siblingIds: [10023], viaReply: true })
+    expect(at(chain, 24)).toMatchObject({ parentId: 10021, status: 'fork', siblingCount: 1, viaReply: true })
+    expect(siblingsOf(at(chain, 24)!, chain)).toEqual([10023])
     expect(core[3].replyToPostNumber).toBe(21)
   })
   it('曲 qǔ 与取 qǔ 同调，要求同调时仍可承接', () => {
@@ -62,7 +64,7 @@ describe('验收：接龙判断', () => {
     const posts = [make(1, '川流不息'), make(2, '取之不尽')]
     const verdict = at(buildChain(posts, settings, [], full(posts)), 2)!
     expect(verdict).toMatchObject({ parentId: null, status: 'break' })
-    expect(verdict.reason).toContain('#1')
+    expect(formatText('zh-CN', verdict.reason)).toContain('#1')
   })
   it('同音同调的证据强于同音异调', () => {
     const posts = [make(1, '一二三娶'), make(2, '一二三躯'), make(3, '取之不尽')]

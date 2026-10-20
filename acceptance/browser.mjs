@@ -5,6 +5,7 @@ import path from 'node:path';
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { seedPosts, historyPosts, hostHtml, topicId, post } from './fixtures.mjs';
+import { hardeningChecks } from './hardening.mjs';
 
 const project = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const out = path.join(project, 'acceptance', 'artifacts');
@@ -30,7 +31,7 @@ const server = http.createServer(async (req,res) => {
 await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
 const base = `http://127.0.0.1:${server.address().port}`;
 async function check(name, action) {
-  try { await action(); report.push({name,status:'passed'});console.log(`PASS ${name}`); }
+  try { const evidence = await action(); report.push({name,status:'passed',...(evidence === undefined ? {} : { evidence })});console.log(`PASS ${name}`); }
   catch(e) {report.push({name,status:'failed',error:String(e)});console.log(`FAIL ${name}: ${e}`);}
 }
 
@@ -39,6 +40,7 @@ try {
   const tab = (page, name) => page.getByRole('tab', { name: new RegExp(`^${name}`) });
   const panel = page => page.locator('.tm-panel');
   const edge = page => page.getByRole('button', { name: /^展开 ThreadMap/ });
+  const startLoad = async (page, name = '加载更多楼层') => { await page.getByRole('button', { name, exact: true }).click(); await page.getByRole('button', { name: '开始加载', exact: true }).click(); };
   const box = async locator => { const b = await locator.boundingBox(); assert(b, 'element not visible'); return b; };
   const near = (a, b, label) => assert(Math.abs(a - b) <= 1, `${label}: ${a} ≠ ${b}`);
 
@@ -120,7 +122,7 @@ try {
   await check('交互：点击原帖标注聚焦该楼；“跳到”滚动页面并高亮', async()=>{
     await demo.locator('[data-post-number="8"] .threadmap-badge').click();
     await demo.locator('.tm-detail-head h3',{hasText:'#8 · Mint'}).waitFor();
-    await demo.locator('section[aria-label="第 8 楼的判断"]').getByRole('button',{name:'跳到原帖'}).click();
+    await demo.locator('section[aria-label="第 8 楼的判断"]').getByRole('link',{name:'跳到原帖'}).click();
     await demo.locator('[data-post-number="8"].threadmap-flash').waitFor();
   });
   await check('交互：规则切换立即重算', async()=>{
@@ -134,7 +136,7 @@ try {
   await check('基准：所有可点击目标不小于 24×24（WCAG 2.5.8）', async()=>{
     for (const name of ['接龙','问题','规则']) {
       await tab(demo,name).click();
-      const small = await panel(demo).evaluate(root => [...root.querySelectorAll('button,input,select,[role=separator][tabindex]')].filter(el => el.offsetParent !== null && !el.classList.contains('tm-link') && !el.classList.contains('tm-resize')).map(el => ({ t: (el.getAttribute('aria-label') || el.textContent || '').trim().slice(0, 12), w: el.getBoundingClientRect().width, h: el.getBoundingClientRect().height })).filter(r => r.w < 24 || r.h < 24));
+      const small = await panel(demo).evaluate(root => [...root.querySelectorAll('button,a[href],input,select,[role=separator][tabindex]')].filter(el => el.offsetParent !== null && !el.classList.contains('tm-link') && !el.classList.contains('tm-resize')).map(el => ({ t: (el.getAttribute('aria-label') || el.textContent || '').trim().slice(0, 12), w: el.getBoundingClientRect().width, h: el.getBoundingClientRect().height })).filter(r => r.w < 24 || r.h < 24));
       assert.deepEqual(small, [], `${name}: ${JSON.stringify(small)}`);
     }
     await tab(demo,'接龙').click();
@@ -143,7 +145,7 @@ try {
     const bg = () => demo.locator('.tm-panel').evaluate(el => getComputedStyle(el).backgroundColor);
     const light = await bg();
     await demo.getByRole('button',{name:'切换到深色面板'}).click();
-    await demo.waitForFunction(() => getComputedStyle(document.querySelector('.tm-panel')).backgroundColor === 'rgb(21, 27, 25)');
+    await demo.waitForFunction(() => getComputedStyle(document.querySelector('.tm-panel')).backgroundColor === 'rgb(27, 27, 27)');
     assert.notEqual(await bg(), light);
     assert.equal(await demo.locator('[data-post-number="2"] .threadmap-badge').getAttribute('data-scheme'), 'dark');
     await demo.screenshot({ path: path.join(out, 'desktop-dark.png') });
@@ -195,7 +197,7 @@ try {
     assert(await panel(demo).isHidden(), '钉住后面板隐藏');
     await demo.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === '展开面板');
     const text = await hud.innerText();
-    assert(text.includes('现在该接') && text.includes('46/46') && text.includes('跳到 #46'), text);
+    assert(text.includes('现在该接') && text.includes('共 46 楼') && text.includes('跳到 #46'), text);
     await demo.screenshot({ path: path.join(out, 'hud.png') });
     const bar = await box(hud.locator('.tm-hud-bar'));
     await demo.mouse.move(bar.x + 40, bar.y + bar.height / 2); await demo.mouse.down();
@@ -232,11 +234,14 @@ try {
     assert(script.includes('// @match        https://linux.do/t/*'));
     const { version } = JSON.parse(await fs.readFile(path.join(project, 'package.json'), 'utf8'));
     assert(script.includes(`// @version      ${version}`));
+    assert(/构建标识：[0-9a-f]{12}（/.test(script), '产物应带可核对的构建标识');
+    assert(!script.includes('__THREADMAP_BUILD__'), '构建信息必须在打包时替换');
     assert(script.includes('CC BY-SA 4.0'));
     assert(script.includes('.tm-panel'));
     assert(!script.includes('pinyin-pro'));
   });
   const integration = await context.newPage();
+  await integration.clock.install({ time: new Date() });
   const requests = [];
   let failure = null;
   let holdBatch = false;
@@ -262,6 +267,8 @@ try {
   });
   await check('UserScript：贴边按钮常驻、默认收起；接龙主题收起时也标注；不抓历史', async()=>{
     await integration.goto(`https://linux.do/t/acceptance/${topicId}`);
+    // 主动补取默认关闭；本组旧的多批次回归显式开启许可并选100楼，确认前仍应零请求。
+    await integration.evaluate(() => localStorage.setItem('threadmap-prefs-v2', JSON.stringify({ allowLoad: true, loadCount: 100 })));
     await integration.addScriptTag({content:script});
     await edge(integration).waitFor();
     await integration.waitForTimeout(300);
@@ -292,16 +299,20 @@ try {
   });
   await check('UserScript：可取消加载，已载入部分保留', async()=>{
     holdBatch=true;
-    await integration.getByRole('button',{name:'加载全部楼层',exact:true}).click();
+    await startLoad(integration);
+    await integration.getByText('正在载入 4/45 楼', { exact: true }).waitFor();
     await integration.getByRole('button',{name:'取消加载',exact:true}).click();
-    await integration.getByText('已取消').waitFor();
+    await integration.getByText('已取消', { exact: false }).waitFor();
+    assert((await panel(integration).innerText()).includes('已载入 4 楼 / 45'), '取消也保留已验证的 stream');
     holdBatch=false;
   });
   await check('UserScript：完整读取按数据库 ID 串行分批，缺口判断随之消失', async()=>{
     const before=requests.length;
-    await integration.getByRole('button',{name:'加载全部楼层',exact:true}).click();
+    await integration.clock.fastForward(61_000); // 模拟冷却经过，不修改生产策略或删除防过频记录
+    await startLoad(integration);
     await integration.getByRole('button',{name:'检查新楼层',exact:true}).waitFor({timeout:15000});
-    assert.equal(requests.length-before,4,'1 topic + 3 batches for 41 missing posts');
+    assert.equal(requests.length-before,3,'known stream: 3 batches for 41 missing posts, no repeated topic JSON');
+    assert(requests.slice(before).every(req => new URL(req.url).pathname === `/t/${topicId}/posts.json`));
     const text=await panel(integration).innerText();
     assert(text.includes('已载入 45 楼 / 45') && text.includes('已载入全部楼层'), text.slice(0,300));
     assert(!text.includes('前文没载入'));
@@ -316,16 +327,24 @@ try {
   await check('UserScript：429 有明确提示且不自动重试', async()=>{
     failure=429;
     const before=requests.length;
-    await integration.getByRole('button',{name:'检查新楼层',exact:true}).click();
+    await integration.clock.fastForward(61_000);
+    await startLoad(integration, '检查新楼层');
     await integration.getByRole('alert').filter({hasText:'429'}).waitFor();
     await integration.waitForTimeout(400);
     assert.equal(requests.length,before+1);
+    assert.equal(await integration.getByRole('button',{name:'检查新楼层',exact:true}).count(),0,'429 后应自动关闭补取许可');
     failure=null;
   });
   await check('UserScript：Cloudflare 验证页提示去完成验证，而不是“没有权限”', async()=>{
     failure='challenge';
-    await integration.getByRole('button',{name:'检查新楼层',exact:true}).click();
+    await integration.clock.fastForward(30 * 60_000 + 1000);
+    // 保护性失败已关闭许可：只有用户重新开启并再次确认才会发请求。
+    await tab(integration,'规则').click();
+    await integration.getByRole('switch',{name:'允许主动补取楼层'}).click();
+    await startLoad(integration, '检查新楼层');
     await integration.getByRole('alert').filter({hasText:'人机验证'}).waitFor();
+    assert.equal(await integration.getByRole('switch',{name:'允许主动补取楼层'}).getAttribute('aria-checked'),'false');
+    await tab(integration,'接龙').click();
     failure=null;
   });
   await check('UserScript：DOM 新楼合并后不丢失已加载历史', async()=>{
@@ -380,22 +399,26 @@ try {
     await page.addScriptTag({ content: script });
     await edge(page).waitFor();
     assert((await edge(page).getAttribute('aria-label')).includes('2 个问题被重复问过'));
-    assert((await page.locator('[data-post-number="2"] .threadmap-badge').innerText()).includes('被问过 3 次 · 1 条回答'));
+    assert((await page.locator('[data-post-number="2"] .threadmap-badge').innerText()).includes('被问过 3 次 · 1 条相关回复'));
     assert((await page.locator('[data-post-number="6"] .threadmap-badge').innerText()).includes('相似问题见 #2'));
     assert.equal(await page.locator('[data-post-number="3"] .threadmap-badge').count(), 0, '回答楼不标注');
     await page.locator('[data-post-number="6"] .threadmap-badge').click();
-    await page.locator('section[aria-label="问题组"] h3', { hasText: '问过 3 次' }).waitFor();
+    await page.locator('section[aria-label="问题组"] h3', { hasText: '脚本怎么安装' }).waitFor();
     await page.waitForFunction(() => document.querySelector('#threadmap-root').shadowRoot.activeElement?.matches('h3'));
     assert.deepEqual((await page.getByRole('tab').allInnerTexts()).map(t => t.replace(/\s+/g, '')), ['问答2', '规则']);
     assert((await panel(page).innerText()).includes('帖子问答'));
+    assert((await page.locator('.tm-post-text').innerText()).includes('先装油猴'));
+    assert((await page.locator('.tm-reply-evidence').innerText()).includes('引用提问 #2'));
+    await page.getByRole('button', { name: '返回问题列表', exact: false }).click();
     await page.locator('#tm-ask').fill('脚本如何安装');
-    assert((await page.locator('.tm-results').innerText()).includes('问过 3 次 · 1 条回答'));
+    const resultText = await page.locator('.tm-search-results').innerText();
+    assert(resultText.includes('问过 3 次') && resultText.includes('1 条相关回复'));
     await page.locator('#tm-ask').fill('完全无关');
     assert((await page.locator('.tm-results').innerText()).includes('没有找到相似的提问'));
     await page.screenshot({ path: path.join(out, 'qa.png') });
     await page.close();
   });
-  await check('超大主题：加载前说明请求数与耗时，确认后才发请求；滚动时不卡', async()=>{
+  await check('超大主题：确认前不请求，说明本次预算和间隔而非自动抓完整帖；滚动时不卡', async()=>{
     const bigTopic = 7004, total = 3000;
     const shown = Array.from({ length: 20 }, (_, i) => post(i + 1, ['一心一意','意气风发','发奋图强','强人所难','难能可贵'][i % 5], null, bigTopic));
     const seen = [];
@@ -408,11 +431,12 @@ try {
     await page.goto(`https://linux.do/t/big/${bigTopic}`);
     // 模拟 Discourse 页面数据：完整 stream 已知，只加载了前 20 楼
     await page.evaluate(([topic, n, posts]) => { window.Discourse = { __container__: { lookup: name => name === 'controller:topic' ? { model: { id: topic, postStream: { stream: Array.from({ length: n }, (_, i) => topic * 1000 + i + 1), posts } } } : undefined } } }, [bigTopic, total, shown.map(p => ({ id: p.id, post_number: p.post_number, username: p.username, cooked: p.cooked, reply_to_post_number: null }))]);
+    await page.evaluate(() => localStorage.setItem('threadmap-prefs-v2', JSON.stringify({ allowLoad: true, loadCount: 100 })));
     await page.addScriptTag({ content: script });
     await edge(page).click();
-    await page.getByRole('button', { name: '加载全部楼层' }).click();
+    await page.getByRole('button', { name: '加载更多楼层' }).click();
     const banner = await page.getByRole('alert').filter({ hasText: '还有 2980 楼未载入' }).innerText();
-    assert(banner.includes('149 次请求') && banner.includes('分钟'), banner);
+    assert(banner.includes('149 个批次') && banner.includes('最多 5 次请求') && banner.includes('至少 5 秒') && banner.includes('不封号'), banner);
     await page.getByRole('button', { name: '先不加载' }).click();
     assert.equal(seen.length, 0, '确认前不发请求');
     const longest = await page.evaluate(async () => {
@@ -422,10 +446,12 @@ try {
     });
     assert(longest < 200, `滚动时出现 ${longest}ms 的长任务`);
     await page.close();
+    return { streamTotal: total, visiblePosts: shown.length, requestsBeforeConfirmation: seen.length, longestScrollTaskMs: longest };
   });
+  await hardeningChecks({ context, script, check });
   await check('浏览器无未捕获异常',async()=>assert.deepEqual(errors,[]));
 } finally {
-  await fs.writeFile(path.join(out,'browser-report.json'),JSON.stringify({date:new Date().toISOString(),report,errors},null,2));
+  await fs.writeFile(path.join(out,'browser-report.json'),JSON.stringify({date:new Date().toISOString(),nodeVersion:process.version,browserVersion:browser.version(),report,errors},null,2));
   await browser.close();
   await new Promise(resolve=>server.close(resolve));
 }

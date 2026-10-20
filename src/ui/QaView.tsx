@@ -1,78 +1,142 @@
-import { h } from 'preact'
-import { useEffect, useRef, useState } from 'preact/hooks'
-import type { QaResult, QuestionCluster } from '../core/questions'
-import type { Post } from '../core/types'
+import { h, type RefObject } from 'preact'
+import { useLayoutEffect, useRef } from 'preact/hooks'
+import { defaultQaSettings, type QaResult, type QaSettings, type QuestionCluster } from '../core/questions'
+import type { Post, PostNavigation } from '../core/types'
+import { useI18n } from './I18n'
+import { PostLink } from './PostLink'
+import { PostPreview } from './PostPreview'
+import { useRemembered, type ViewMemory } from './remembered'
 
 const PAGE = 20
-const excerpt = (text: string, max = 60) => text.length > max ? `${text.slice(0, max)}…` : text
+const SHOWN_FLOORS = 20
+const excerpt = (text: string, max = 120) => text.length > max ? `${text.slice(0, max)}…` : text
+interface ReaderTarget { questionId: number; postId: number | null }
 
 interface Props {
   qa: QaResult
   byId: Map<number, Post>
   selected: number | null
+  active?: boolean
+  confirmingLoad?: boolean
   focusDetail: boolean
   onFocused: () => void
   onSelect: (id: number) => void
-  onJump: (id: number) => void
+  navigation: PostNavigation
   missing: number
+  settings?: QaSettings
+  memory?: ViewMemory
+  scrollContainer?: RefObject<HTMLDivElement>
 }
 
-/** 问答页：先查再问 → 选中楼所在的问题组 → 重复问题列表（docs/ui-spec.md §5） */
-export function QaView({ qa, byId, selected, focusDetail, onFocused, onSelect, onJump, missing }: Props) {
-  const [query, setQuery] = useState('')
-  const [page, setPage] = useState(0)
+/** 一步进入问题与回复，在同一滚动区阅读；返回而不是把多个卡片堆在列表上方。 */
+export function QaView({ qa, byId, selected, active = true, confirmingLoad = false, focusDetail, onFocused, onSelect, navigation, missing, settings = defaultQaSettings, memory, scrollContainer }: Props) {
+  const { t } = useI18n()
+  const [query, setQuery] = useRemembered(memory, 'qa.query', '')
+  const [page, setPage] = useRemembered(memory, 'qa.page', 0)
+  const [reader, setReader] = useRemembered<ReaderTarget | null>(memory, 'qa.reader', null)
+  const [listScroll, setListScroll] = useRemembered(memory, 'qa.listScroll', 0)
+  const queryInput = useRef<HTMLInputElement>(null)
+  const trigger = useRef<HTMLElement | null>(null)
+  const readerHeading = useRef<HTMLHeadingElement>(null)
+  const readerRoot = useRef<HTMLElement>(null)
+  const focusAction = useRef<'open' | 'back' | null>(null)
   const results = query.trim() ? qa.search(query) : []
-  const current = selected === null ? undefined : qa.clusterOf.get(selected)
+  const current = reader ? qa.clusterOf.get(reader.questionId) : undefined
   const pages = Math.max(1, Math.ceil(qa.repeated.length / PAGE))
   const pageIndex = Math.min(page, pages - 1)
 
-  return <>
-    <section class="tm-field">
-      <label htmlFor="tm-ask">想问什么？先在本帖里查一下（只在本地检查）</label>
-      <div class="tm-field-row">
-        <input id="tm-ask" class="tm-input" value={query} maxLength={120} autocomplete="off" placeholder="例如：脚本怎么安装" onInput={e => setQuery((e.currentTarget as HTMLInputElement).value)} onKeyDown={e => { if (e.key === 'Escape' && query) { e.preventDefault(); setQuery('') } }} />
-        {query && <button type="button" class="tm-button" onClick={() => setQuery('')}>清除</button>}
-      </div>
-      <ul class="tm-results" role="status" aria-live="polite">
-        {query.trim() && !results.length && <li class="tm-result">已载入的楼层里没有找到相似的提问{missing ? `（还有 ${missing} 楼未载入）` : ''}。</li>}
-        {results.map(({ cluster }) => <li class="tm-result" data-tone={cluster.answerIds.length ? 'ok' : undefined} key={cluster.id}>
-          #{byId.get(cluster.questionIds[0])?.postNumber} 问过 {cluster.questionIds.length} 次 · {cluster.answerIds.length ? `${cluster.answerIds.length} 条回答` : '没有明确回答'}：{excerpt(cluster.text, 40)}{' '}
-          <button type="button" class="tm-link" onClick={() => onSelect(cluster.questionIds[0])}>查看</button>
-        </li>)}
-      </ul>
-    </section>
+  const open = (cluster: QuestionCluster, questionId: number, source?: HTMLElement) => {
+    if (!reader) setListScroll(scrollContainer?.current?.scrollTop ?? 0)
+    trigger.current = source ?? null
+    focusAction.current = 'open'
+    const postId = reader && cluster.questionIds.includes(reader.questionId) ? reader.postId : cluster.answerIds[0] ?? null
+    setReader({ questionId, postId })
+    if (selected !== questionId) onSelect(questionId)
+  }
+  const back = () => { focusAction.current = 'back'; setReader(null) }
+  // 原帖标注/小窗是显式阅读请求；普通阅读位置提示只更新选中，不自动展开或抢焦点。
+  useLayoutEffect(() => {
+    if (!active || !focusDetail || selected === null) return
+    const cluster = qa.clusterOf.get(selected)
+    if (cluster) open(cluster, selected)
+    onFocused()
+  }, [active, focusDetail, selected, qa])
+  useLayoutEffect(() => {
+    if (!active || !focusAction.current) return
+    const action = focusAction.current
+    // 外部标注的请求先安排阅读状态，再挂载标题；不能在 reader 仍为空的提交中消费动作。
+    if ((action === 'open' && !reader) || (action === 'back' && reader)) return
+    focusAction.current = null
+    if (action === 'open' && reader) {
+      readerHeading.current?.focus({ preventScroll: true })
+      const body = scrollContainer?.current, root = readerRoot.current
+      if (body && root) body.scrollTop += root.getBoundingClientRect().top - body.getBoundingClientRect().top
+    } else if (action === 'back' && !reader) {
+      const target = trigger.current?.isConnected ? trigger.current : queryInput.current
+      target?.focus({ preventScroll: true })
+      if (scrollContainer?.current) scrollContainer.current.scrollTop = listScroll
+    }
+  }, [reader])
 
-    {current && <ClusterCard cluster={current} byId={byId} focus={focusDetail} onFocused={onFocused} onJump={onJump} selectedId={selected} />}
+  const summary = (cluster: QuestionCluster) => !settings.associateReplies ? t('qa.unlinked') : cluster.answerIds.length ? t('qa.replies', { count: cluster.answerIds.length }) : t('qa.noReplies')
+  const row = (cluster: QuestionCluster) => {
+    const first = byId.get(cluster.questionIds[0])
+    return <li class="tm-topic-row" key={cluster.questionIds[0]}>
+      <button type="button" class="tm-topic-button" aria-label={t('qa.readLabel', { number: first?.postNumber ?? '?' })} onClick={e => open(cluster, cluster.questionIds[0], e.currentTarget)}>
+        <span class="tm-topic-meta">#{first?.postNumber} · {t('qa.asked', { count: cluster.questionIds.length })}</span>
+        <strong>{excerpt(cluster.text)}</strong>
+        <span class="tm-topic-meta">{summary(cluster)} <span aria-hidden="true">→</span></span>
+      </button>
+    </li>
+  }
 
-    <div class="tm-summary"><span>{qa.questions.size} 楼在提问 · {qa.repeated.length} 个问题被重复问过</span></div>
+  return <div class="tm-stack tm-qa" onKeyDown={e => {
+    if (active && reader && !confirmingLoad && e.key === 'Escape' && !e.defaultPrevented) { e.preventDefault(); e.stopPropagation(); back() }
+  }}>
+    {/* 列表隐藏而非销毁；查询、分页、焦点入口与原滚动位置仍属于当前主题。 */}
+    <div class="tm-stack" hidden={!!reader}>
+      <section class="tm-field">
+        <label htmlFor="tm-ask">{t('qa.searchLabel')}</label>
+        <div class="tm-field-row">
+          <input id="tm-ask" ref={queryInput} class="tm-input" value={query} maxLength={120} autocomplete="off" placeholder={t('qa.placeholder')} onInput={e => setQuery(e.currentTarget.value)} onKeyDown={e => { if (e.key === 'Escape' && query) { e.preventDefault(); setQuery('') } }} />
+          {query && <button type="button" class="tm-button" onClick={() => { setQuery(''); queryInput.current?.focus() }}>{t('common.clear')}</button>}
+        </div>
+        <div class="tm-results" role="status" aria-live="polite">{query.trim() && !results.length && <p class="tm-result">{t('qa.noResults')}{missing ? t('qa.missing', { count: missing }) : ''}</p>}</div>
+        {!!results.length && <ul class="tm-topics tm-search-results">{results.map(({ cluster }) => row(cluster))}</ul>}
+      </section>
+      <div class="tm-summary"><span>{t('qa.summary', { questions: qa.questions.size, repeated: qa.repeated.length })}</span></div>
+      {qa.repeated.length
+        ? <ul class="tm-topics tm-repeated">{qa.repeated.slice(pageIndex * PAGE, (pageIndex + 1) * PAGE).map(row)}</ul>
+        : <div class="tm-empty"><strong>{t(qa.questions.size ? 'qa.noRepeated' : 'qa.noQuestions')}</strong>{qa.questions.size ? t('qa.detected', { count: qa.questions.size }) : t('qa.contextHint')}{!settings.approximate && t('qa.exactHint')}{t('qa.nextHint')}</div>}
+      {pages > 1 && <nav class="tm-pager" aria-label={t('common.pages')}><button type="button" class="tm-button" disabled={pageIndex === 0} onClick={() => setPage(pageIndex - 1)}>{t('common.previousPage')}</button><span>{pageIndex + 1} / {pages}</span><button type="button" class="tm-button" disabled={pageIndex >= pages - 1} onClick={() => setPage(pageIndex + 1)}>{t('common.nextPage')}</button></nav>}
+      <p class="tm-note">{t(settings.approximate ? 'qa.method' : 'qa.exactHint')}{t(settings.associateReplies ? 'qa.replyMethod' : 'qa.repliesOff')}</p>
+    </div>
 
-    {qa.repeated.length
-      ? <ul class="tm-issues">{qa.repeated.slice(pageIndex * PAGE, (pageIndex + 1) * PAGE).map(cluster => {
-          const first = byId.get(cluster.questionIds[0])
-          return <li class="tm-issue" data-kind="repeat" key={cluster.id}>
-            <div class="tm-issue-main"><span class="tm-kind">问过 {cluster.questionIds.length} 次</span><b>#{first?.postNumber} {first?.username}</b><p>{excerpt(cluster.text)}</p></div>
-            <div class="tm-issue-actions">
-              <button type="button" class="tm-button" aria-label={`查看第 ${first?.postNumber} 楼的问题组`} onClick={() => onSelect(cluster.questionIds[0])}>查看</button>
-              {cluster.answerIds.length ? <button type="button" class="tm-button" aria-label={`跳到第 ${byId.get(cluster.answerIds[0])?.postNumber} 楼的回答`} onClick={() => onJump(cluster.answerIds[0])}>回答</button> : null}
-            </div>
-          </li>
-        })}</ul>
-      : <div class="tm-empty"><strong>没有发现重复提问</strong>已载入的楼层里，每个问题都只被问过一次。</div>}
-    {pages > 1 && <nav class="tm-pager" aria-label="问题分页"><button type="button" class="tm-button" disabled={pageIndex === 0} onClick={() => setPage(pageIndex - 1)}>上一页</button><span>{pageIndex + 1} / {pages}</span><button type="button" class="tm-button" disabled={pageIndex >= pages - 1} onClick={() => setPage(pageIndex + 1)}>下一页</button></nav>}
-    <p class="tm-note">按字面相似度归组：意思相同但用词不同的问题可能认不出来，也可能把不相关的问题归在一起。回答只算明确回复或引用了提问的楼，按点赞排序。</p>
-  </>
+    {reader && <section class="tm-stack tm-reader" aria-label={t('reader.label')} ref={readerRoot}>
+      <div class="tm-reader-nav"><button type="button" class="tm-button" onClick={back}>← {t('reader.back')}</button></div>
+      <section class="tm-question-context" aria-label={t('reader.question')}>
+        <h3 tabIndex={-1} ref={readerHeading}>{current ? current.text : t('reader.missingQuestion')}</h3>
+        {current && <>
+          <div class="tm-topic-meta">{t('qa.asked', { count: current.questionIds.length })} · {summary(current)}</div>
+          <div class="tm-actions"><PostLink post={byId.get(current.questionIds[0])} navigation={navigation}>{t('reader.first')}</PostLink></div>
+          <QuestionPosts cluster={current} byId={byId} selectedId={reader.questionId} navigation={navigation} />
+        </>}
+      </section>
+      {current && (!settings.associateReplies ? <p class="tm-note">{t('reader.offHint')}</p>
+        : reader.postId !== null ? <PostPreview ids={current.answerIds} byId={byId} selectedId={reader.postId} active={active} focusable={false} navigation={navigation} evidence={current.answerEvidence.get(reader.postId)} onSelect={postId => setReader({ ...reader, postId })} />
+        : current.answerIds.length ? <button type="button" class="tm-button" onClick={() => { focusAction.current = 'open'; setReader({ ...reader, postId: current.answerIds[0] }) }}>{t('qa.readReplies', { count: current.answerIds.length })}</button>
+        : <p class="tm-empty">{t('reader.noReplyHint')}</p>)}
+    </section>}
+  </div>
 }
 
-function ClusterCard({ cluster, byId, focus, onFocused, onJump, selectedId }: { cluster: QuestionCluster; byId: Map<number, Post>; focus: boolean; onFocused: () => void; onJump: (id: number) => void; selectedId: number | null }) {
-  const heading = useRef<HTMLHeadingElement>(null)
-  useEffect(() => { if (focus) { heading.current?.focus(); heading.current?.scrollIntoView({ block: 'nearest' }); onFocused() } }, [focus, cluster.id])
-  const floor = (id: number) => <button type="button" class="tm-link" key={id} aria-current={id === selectedId ? 'true' : undefined} onClick={() => onJump(id)}>#{byId.get(id)?.postNumber}{id === selectedId ? ' 当前' : ''}</button>
-  return <section class="tm-card" aria-label="问题组">
-    <div class="tm-detail-head"><h3 tabIndex={-1} ref={heading}>问过 {cluster.questionIds.length} 次</h3><button type="button" class="tm-button" onClick={() => onJump(cluster.questionIds[0])}>跳到首问</button></div>
-    <p class="tm-reason">{excerpt(cluster.text, 160)}</p>
-    <dl class="tm-facts">
-      <dt>提问楼</dt><dd class="tm-actions">{cluster.questionIds.map(floor)}</dd>
-      <dt>回答</dt><dd class="tm-actions">{cluster.answerIds.length ? cluster.answerIds.slice(0, 8).map(id => <span key={id}>{floor(id)}{byId.get(id)?.likeCount ? ` ♥${byId.get(id)!.likeCount}` : ''}</span>) : '没有找到明确回复或引用这些提问的楼'}</dd>
-    </dl>
-  </section>
+function QuestionPosts({ cluster, byId, selectedId, navigation }: { cluster: QuestionCluster; byId: Map<number, Post>; selectedId: number; navigation: PostNavigation }) {
+  const { t } = useI18n()
+  const shown = cluster.questionIds.slice(0, SHOWN_FLOORS)
+  if (!shown.includes(selectedId) && cluster.questionIds.includes(selectedId)) shown.push(selectedId)
+  const hidden = cluster.questionIds.length - shown.length
+  return <details class="tm-question-posts">
+    <summary>{t('reader.questionPosts', { count: cluster.questionIds.length })}</summary>
+    <div class="tm-actions">{shown.map(id => <PostLink post={byId.get(id)} navigation={navigation} key={id} current={id === selectedId}>#{byId.get(id)?.postNumber}{id === selectedId ? t('reader.current') : ''}</PostLink>)}{hidden > 0 && <span class="tm-note">{t('reader.more', { count: hidden })}</span>}</div>
+  </details>
 }

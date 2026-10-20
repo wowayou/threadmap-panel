@@ -3,6 +3,8 @@ import { useEffect, useMemo, useState } from 'preact/hooks'
 import type { Badge } from '../core/chain'
 import { createSession, type HostApi } from '../core/session'
 import { badgeCss } from '../host/badges'
+import { OWNER_ATTR, OWNER_TOKEN } from '../host/owner'
+import { watchSiteLanguage } from '../host/locale'
 import { Widget } from '../ui/Widget'
 import { chainDemoPosts } from './fixture'
 import './demo.css'
@@ -21,6 +23,7 @@ function Demo() {
   const [reading, setReading] = useState(1)
   useEffect(() => session.setReading(reading), [reading])
   useEffect(() => session.setScheme(scheme), [scheme])
+  useEffect(() => watchSiteLanguage(session.setSiteLanguage), [session])
   useEffect(() => {
     const onScroll = () => {
       let n = 1
@@ -33,12 +36,16 @@ function Demo() {
 
   const host: HostApi = useMemo(() => ({
     session,
-    jump: post => {
-      const el = document.querySelector<HTMLElement>(`[data-post-number="${post.postNumber}"]`)
-      if (!el) return
-      el.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'center' })
-      el.dataset.threadmapScheme = session.get().scheme
-      el.classList.add('threadmap-flash'); window.setTimeout(() => el.classList.remove('threadmap-flash'), 1600)
+    navigation: {
+      href: post => `#demo-post-${post.postNumber}`,
+      reveal(post) {
+        const el = document.querySelector<HTMLElement>(`[data-post-number="${post.postNumber}"]`)
+        if (!el) return false
+        el.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'center' })
+        el.dataset.threadmapScheme = session.get().scheme
+        el.classList.add('threadmap-flash'); window.setTimeout(() => el.classList.remove('threadmap-flash'), 1600)
+        return true
+      },
     },
     setBadges,
   }), [session])
@@ -51,10 +58,10 @@ function Demo() {
         <button type="button" class="demo-scheme" aria-pressed={scheme === 'dark'} onClick={() => setScheme(scheme === 'dark' ? 'light' : 'dark')}>{scheme === 'dark' ? '切换到浅色面板' : '切换到深色面板'}</button>
       </header>
       <section class="demo-posts" aria-label="演示主题帖子">
-        {chainDemoPosts.map(p => { const badge = badges?.get(p.postNumber); return <article data-post-number={p.postNumber} class="demo-post" key={p.id}>
+        {chainDemoPosts.map(p => { const badge = badges?.get(p.postNumber); return <article id={`demo-post-${p.postNumber}`} data-post-number={p.postNumber} class="demo-post" key={p.id}>
           <div class="demo-post-head"><span class="demo-avatar" aria-hidden="true">{p.username.slice(0, 1)}</span><b>#{p.postNumber} {p.username}</b><time dateTime={p.createdAt}>{new Date(p.createdAt).toLocaleString('zh-CN')}</time></div>
           <div class="cooked">
-            {badge && <button type="button" class={`threadmap-badge ${badge.tone}`} data-scheme={scheme} title={badge.title} aria-label={`ThreadMap：第 ${p.postNumber} 楼 ${badge.label}，点击查看判断`} onClick={() => session.focus(p.postNumber)}>{badge.icon} {badge.label}</button>}
+            {badge && <button type="button" class={`threadmap-badge ${badge.tone}`} {...{ [OWNER_ATTR]: OWNER_TOKEN }} data-scheme={scheme} title={badge.title} aria-label={`ThreadMap · #${p.postNumber} · ${badge.label}`} onClick={() => session.focus(p.postNumber)}>{badge.icon} {badge.label}</button>}
             <p>{p.text}</p>
           </div>
           {p.replyToPostNumber ? <small>回复 #{p.replyToPostNumber}</small> : null}

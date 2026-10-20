@@ -22,6 +22,7 @@ describe('安全基线：源码', () => {
     const loader = readFileSync(join(root, 'src/host/loader.ts'), 'utf8')
     expect(loader.match(/method:\s*'([A-Z]+)'/g)).toEqual(["method: 'GET'"])
     expect(loader).toContain("credentials: 'same-origin'")
+    expect(loader).toContain("redirect: 'error'")
     expect(loader).not.toMatch(/https?:\/\//)
   })
 
@@ -29,15 +30,33 @@ describe('安全基线：源码', () => {
     expect(find(/\bGM[._]|unsafeWindow|document\.cookie/)).toEqual([])
   })
 
+  it('预览/定位不整页刷新、不调用可能刷新页面的私有路由', () => {
+    expect(find(/location\s*(?:\.(?:href|assign|replace|reload))?\s*[=(]|\.routeTo\s*\(/)).toEqual([])
+  })
+
+  it('预留阅读API没有接到运行实例或外部传输，不拥有宿主写能力', () => {
+    const api = readFileSync(join(root, 'src/core/reader-api.ts'), 'utf8')
+    expect(api).not.toMatch(/from ['"].*\/host\//)
+    expect(find(/\bfetch\b|\bwindow\b|\bdocument\b|\blocalStorage\b|\bindexedDB\b|addEventListener|setTimeout|setInterval/).filter(line => line.startsWith('src/core/reader-api.ts'))).toEqual([])
+    expect(readFileSync(join(root, 'src/userscript.tsx'), 'utf8')).not.toMatch(/createReaderApi|reader-api/)
+    expect(readFileSync(join(root, 'src/ui/Widget.tsx'), 'utf8')).not.toMatch(/createReaderApi|reader-api/)
+  })
+
   it('不提交表单、不点击论坛自身的按钮、不改写论坛数据', () => {
     expect(find(/\.submit\(\)|requestSubmit|\.click\(\)|\.ajax\(|\.(save|destroyRecord|deleteRecord|createRecord|updateRecord)\(/)).toEqual([])
   })
 
-  it('本地存储只写设置与纠正两个键', () => {
+  it('设置、纠正、冷却写入受限；正文只能经过独立缓存数据库', () => {
     const keys = sources.flatMap(({ code }) => [...code.matchAll(/'(threadmap-[a-z0-9-]+)'/g)].map(m => m[1]))
-    const storage = readFileSync(join(root, 'src/core/storage.ts'), 'utf8')
-    expect([...storage.matchAll(/_KEY = '([^']+)'/g)].map(m => m[1]).sort()).toEqual(['threadmap-overrides-v1', 'threadmap-prefs-v2'])
-    expect(find(/localStorage\.setItem|sessionStorage|indexedDB/)).toEqual([])
+    const storedKeys = sources.flatMap(({ code }) => [...code.matchAll(/\b[A-Z_]+_KEY = '([^']+)'/g)].map(m => m[1])).sort()
+    expect(storedKeys).toEqual(['threadmap-load-guard-v1', 'threadmap-overrides-v1', 'threadmap-prefs-v2'])
+    expect(find(/\.setItem\s*\(/).map(line => line.split(':')[0]).sort()).toEqual(['src/core/storage.ts', 'src/core/storage.ts', 'src/host/load-guard.ts'])
+    expect(find(/localStorage\.setItem|sessionStorage/)).toEqual([])
+    expect(find(/\bindexedDB\b/).map(line => line.split(':')[0])).toEqual(['src/host/cache-store.ts'])
+    expect([...new Set(find(/\.objectStore\s*\(/).map(line => line.split(':')[0]))]).toEqual(['src/host/cache-store.ts'])
+    const database = readFileSync(join(root, 'src/host/cache-store.ts'), 'utf8')
+    expect(database).toContain("CACHE_DB_NAME = 'threadmap-post-cache-v1'")
+    expect(database).toContain('if (!same(c.consent, consent))')
     expect(keys.length).toBeGreaterThan(0)
   })
 })
@@ -76,6 +95,10 @@ describe('安全基线：构建产物', () => {
     expect(notice).toContain('The above copyright notice and this permission notice shall be')
     expect(notice).toContain('Paul Andrew Denisowski')
     expect(notice).toContain('CC BY-SA 4.0')
+  })
+
+  it.skipIf(!built)('兼容改写进入实际产物：不依赖 Array.at 或正则后行断言', () => {
+    expect(built).not.toMatch(/\.at\s*\(|\(\?<[=!]/)
   })
 
   it.skipIf(!built)('产物里没有动态执行和外部地址（除命名空间与许可说明）', () => {

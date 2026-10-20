@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
-import { badgeFor, buildChain, defaultChainSettings, looksLikeChainTopic, tryPhrase } from '../src/core/chain'
+import { formatText } from '../src/i18n'
+import { badgeFor, buildChain, defaultChainSettings, looksLikeChainTopic, siblingsOf, tryPhrase } from '../src/core/chain'
 import { chainDemoPosts } from '../src/demo/fixture'
 import type { Post } from '../src/core/types'
 
@@ -30,10 +31,36 @@ describe('链头模型', () => {
 
   it('两人接同一楼标为分叉，之后两条链各自延续', () => {
     const chain = buildChain([make(1, '难能可贵'), make(2, '贵在坚持'), make(3, '贵耳贱目'), make(4, '持之以恒'), make(5, '目不转睛')])
-    expect(at(chain, 3)).toMatchObject({ status: 'fork', parentId: 50001, siblingIds: [50002] })
+    expect(at(chain, 3)).toMatchObject({ status: 'fork', parentId: 50001, siblingCount: 1 })
+    expect(siblingsOf(at(chain, 3), chain)).toEqual([50002])
     expect(at(chain, 4)).toMatchObject({ status: 'continue', parentId: 50002, skipped: 1 })
     expect(at(chain, 5)).toMatchObject({ status: 'continue', parentId: 50003, skipped: 1 })
     expect(chain.heads.map(h => h.postNumber)).toEqual([5, 4])
+  })
+
+  it('同一父楼高分叉：兄弟关系共享父楼子列表，理由只列有界预览', () => {
+    const n = 2000
+    const posts = [make(1, '一心一意'), ...Array.from({ length: n }, (_, i) => make(i + 2, '意气风发', 1))]
+    const chain = buildChain(posts)
+    expect(chain.childrenOf.get(50001)).toHaveLength(n)
+    const last = at(chain, n + 1)
+    expect(last).toMatchObject({ status: 'fork', parentId: 50001, siblingCount: n - 1 })
+    expect(last).not.toHaveProperty('siblingIds')
+    expect(siblingsOf(last, chain, 3)).toEqual(ids(2, 3, 4))
+    expect(siblingsOf(at(chain, 4), chain)).toEqual(ids(2, 3))
+    const reason = formatText('zh-CN', last.reason)
+    expect(reason).toContain(`#2, #3, #4, #5, #6 等 ${n - 1} 楼`)
+    expect(reason.length).toBeLessThan(200)
+    // 所有理由文本的总量随楼数线性增长，不再是 n²
+    const total = chain.order.reduce((sum, v) => sum + formatText('zh-CN', v.reason).length, 0)
+    expect(total).toBeLessThan(n * 200)
+    expect(formatText('en', last.reason)).toContain(`and others (${n - 1} posts)`)
+  })
+
+  it('手动指定父楼也记录分叉数量', () => {
+    const chain = buildChain([make(1, '难能可贵'), make(2, '贵在坚持'), make(3, '贵耳贱目')], defaultChainSettings, [{ origin, topicId: 3, childId: 50003, parentId: 50001 }])
+    expect(at(chain, 3)).toMatchObject({ status: 'manual', siblingCount: 1 })
+    expect(siblingsOf(at(chain, 3), chain)).toEqual([50002])
   })
 
   it('未被接走的链头优先；同样可接的其他链头记为“也能接”', () => {
@@ -93,7 +120,7 @@ describe('链头模型', () => {
     expect(at(excluded, 3)).toMatchObject({ status: 'continue', parentId: 50001 })
     const stale = buildChain(posts, defaultChainSettings, [{ origin, topicId: 3, childId: 50003, parentId: 99999 }])
     expect(at(stale, 3)).toMatchObject({ status: 'continue', parentId: 50002 })
-    expect(at(stale, 3).reason).toContain('已失效')
+    expect(formatText('zh-CN', at(stale, 3).reason)).toContain('已失效')
     expect(at(buildChain(posts, defaultChainSettings, [{ origin, topicId: 4, childId: 50003, parentId: 50001 }]), 3).parentId).toBe(50002)
     expect(at(buildChain(posts, defaultChainSettings, [{ origin: 'https://other.example', topicId: 3, childId: 50003, parentId: 50001 }]), 3).parentId).toBe(50002)
   })
@@ -127,7 +154,7 @@ describe('数据缺口', () => {
   it('接上了但中间有楼未载入时，照常判断并说明', () => {
     const chain = buildChain([make(1, '一心一意'), make(4, '意气风发')], defaultChainSettings, [], { stream: ids(1, 2, 3, 4, 5) })
     expect(at(chain, 4)).toMatchObject({ status: 'continue', missingBetween: 2 })
-    expect(at(chain, 4).reason).toContain('2 楼未载入')
+    expect(formatText('zh-CN', at(chain, 4).reason)).toContain('2 楼未载入')
     expect(chain.missingAfterLast).toBe(1)
   })
 

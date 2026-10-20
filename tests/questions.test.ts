@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { buildQa, questionText } from '../src/core/questions'
 import type { Post } from '../src/core/types'
 
@@ -13,6 +13,22 @@ describe('识别提问', () => {
   })
   it('主楼不当作提问', () => {
     expect(buildQa([make(1, '大家怎么看这个方案？')]).questions.size).toBe(0)
+  })
+  it('分句长度边界、连续标点、无句末标点和多句过滤保持原语义', () => {
+    expect(questionText('怎么？')).toBe('')
+    expect(questionText('怎么办？')).toBe('怎么办？')
+    const limit = '怎么' + '甲'.repeat(197) + '？'
+    expect(questionText(limit)).toBe(limit)
+    expect(questionText('甲' + limit)).toBe('')
+    expect(questionText('已经解决了，谢谢！脚本怎么安装？！\n普通说明。邀请码在哪里领')).toBe('脚本怎么安装？ 邀请码在哪里领')
+    expect(questionText((limit + '\n').repeat(3))).toHaveLength(400)
+  })
+  it('无后行断言版本与固定的旧分句算法做 4913 个有界差分样本对照', () => {
+    // 冻结旧规则作对照，不从被测函数读取正则，避免把错误预期一并更新。
+    const previous = (text: string) => text.split(/(?<=[。！？!?；;\n])/u).map(s => s.trim()).filter(s => s.length >= 4 && s.length <= 200)
+      .filter(s => !/(已经|搞定|解决了|知道了|会了|明白了|好了|谢谢|感谢)/u.test(s) && (/[?？]/u.test(s) || /[吗么呢嘛][\s~～。.!！…]*$/u.test(s) || /(怎么|怎样|如何|为什么|为啥|咋|能否|能不能|可不可以|有没有|是否|求教|求助|请教|请问|在哪|哪里|哪儿|哪个|什么|多少|几[个天次]|怎么办|啥)/u.test(s) || /^(how|why|what|when|where|which|who|can|could|does|do|is|are|should|will|would)\b/i.test(s))).join(' ').slice(0, 400)
+    const parts = ['', '脚本怎么安装', '普通陈述', '已经解决了', 'How do I install it', '能使用吗', '？', '?', '!', '。', ';', '；', '\n', '\r\n', ' ', '🙂', '甲'.repeat(201)]
+    for (const a of parts) for (const b of parts) for (const c of parts) expect(questionText(a + b + c)).toBe(previous(a + b + c))
   })
 })
 
@@ -36,6 +52,66 @@ describe('重复提问归组', () => {
     expect(qa.search('脚本如何安装')[0].cluster.questionIds[0]).toBe(1002)
     expect(qa.search('邀请码')[0].cluster.questionIds[0]).toBe(1006)
     expect(qa.search('完全无关的话题')).toEqual([])
+  })
+})
+
+describe('高频提问与证据边界', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('高频相同/改写问题不能因所有词都常见而分裂成几百组', () => {
+    const text = ['脚本怎么安装？', '大佬们，脚本要怎么安装啊', '脚本安装方法是什么？']
+    const qa = buildQa(Array.from({ length: 300 }, (_, i) => make(i + 2, text[i % text.length])))
+    expect(qa.repeated).toHaveLength(1)
+    expect(qa.repeated[0].questionIds).toHaveLength(300)
+    expect(qa.search('脚本如何安装')[0].cluster.questionIds).toHaveLength(300)
+  })
+
+  it('明确不同的 HTTP 错误码不能自动合并，搜索也不把冲突代码当同题', () => {
+    const qa = buildQa([make(2, '访问论坛返回 HTTP 403 错误，怎么处理？'), make(3, '访问论坛返回 HTTP 429 错误，怎么处理？')])
+    expect(group(qa, 2)).toEqual([2])
+    expect(group(qa, 3)).toEqual([3])
+    expect(qa.search('HTTP 403 报错怎么处理？').map(x => x.cluster.questionIds)).toEqual([[1002]])
+  })
+
+  it.each([
+    "<aside data-topic='5' data-post='2' class='quote no-group'><blockquote>提问</blockquote></aside>",
+    '<ASIDE DATA-TOPIC="5" CLASS="quote" DATA-POST="2"><blockquote>提问</blockquote></ASIDE>',
+  ])('引用属性顺序、单引号和标签大小写不影响明确关联 %#', raw => {
+    const qa = buildQa([make(2, '脚本怎么安装？'), make(3, '请参考安装说明。', { raw })])
+    expect(qa.clusterOf.get(1002)?.answerIds).toEqual([1003])
+  })
+
+  it.each([
+    '<aside class="quote" data-post="2" data-topic="invalid"></aside>',
+    '<!-- <aside class="quote" data-post="2" data-topic="5"></aside> -->',
+    '<pre><aside class="quote" data-post="2" data-topic="5"></aside></pre>',
+    '<aside data-note="class=\'quote\' data-post=\'2\'" class="notquote"></aside>',
+  ])('无效主题、注释/代码和伪属性不能提供引用证据 %#', raw => {
+    const qa = buildQa([make(2, '脚本怎么安装？'), make(3, '普通说明。', { raw })])
+    expect(qa.clusterOf.get(1002)?.answerIds).toEqual([])
+  })
+
+  it('不能把早于提问的帖子关联为该提问的回答', () => {
+    const qa = buildQa([make(2, '普通说明。', { replyToPostNumber: 3 }), make(3, '脚本怎么安装？')])
+    expect(qa.clusterOf.get(1003)?.answerIds).toEqual([])
+  })
+
+  it('关闭近似归组只合并整理后相同的问题，关闭关联不生成回答，搜索仍可用', () => {
+    const posts = [make(2, '脚本怎么安装？'), make(3, '脚本怎么安装？'), make(4, '脚本安装方法是什么？'), make(5, '装油猴。', { replyToPostNumber: 2 })]
+    const exact = buildQa(posts, { approximate: false, associateReplies: true })
+    expect(group(exact, 2)).toEqual([2, 3])
+    expect(group(exact, 4)).toEqual([4])
+    expect(exact.clusterOf.get(1002)?.answerIds).toEqual([1005])
+    expect(exact.search('脚本如何安装').length).toBeGreaterThan(0)
+    const unlinked = buildQa(posts, { approximate: true, associateReplies: false })
+    expect(group(unlinked, 4)).toEqual([2, 3, 4])
+    expect(unlinked.clusters.every(c => c.answerIds.length === 0)).toBe(true)
+  })
+
+  it('大量关联回复不重复计入，平台回复和引用同一楼只算一次', () => {
+    const quote = '<aside class="quote" data-post="2" data-topic="5"><blockquote>提问</blockquote></aside><p>回答</p>'
+    const posts = [make(2, '脚本怎么安装？'), ...Array.from({ length: 400 }, (_, i) => make(i + 3, '回答', { replyToPostNumber: 2, raw: quote }))]
+    expect(buildQa(posts).clusterOf.get(1002)?.answerIds).toHaveLength(400)
   })
 })
 

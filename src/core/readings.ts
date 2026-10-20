@@ -1,3 +1,4 @@
+import { i18n, type Locale } from '../i18n'
 import { CHAR_READINGS, KNOWN_WORDS, WORD_BOUNDARY_READINGS } from './readings-data'
 import type { Reading, ReadingSource } from './types'
 
@@ -62,6 +63,6 @@ export function toneMark({ pinyin, tone }: Reading): string {
   return pinyin.slice(0, index) + marks[pinyin[index]][tone - 1] + pinyin.slice(index + 1)
 }
 
-export function formatReadings(readings: Reading[]): string {
-  return readings.length ? readings.map(toneMark).join(' / ') : '未知'
+export function formatReadings(readings: Reading[], locale: Locale = 'zh-CN'): string {
+  return readings.length ? readings.map(toneMark).join(' / ') : i18n(locale).t('chain.unknownReading')
 }

@@ -1,9 +1,19 @@
 import { defineConfig } from 'vite'
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { createHash } from 'node:crypto'
+import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { relative, resolve, sep } from 'node:path'
 
 const { version, license } = JSON.parse(readFileSync(resolve(__dirname, 'package.json'), 'utf8')) as { version: string; license: string }
 const codeLicense = readFileSync(resolve(__dirname, 'LICENSE'), 'utf8').trim().split('\n').map(line => `// ${line}`).join('\n')
+
+/** 源码与构建配置指纹：用于核对已安装脚本是不是同一构建，不是签名；跨平台换行差异会影响结果。 */
+const walk = (dir: string): string[] => readdirSync(dir).flatMap(name => { const file = resolve(dir, name); return statSync(file).isDirectory() ? walk(file) : [file] })
+const buildInputs = [...walk(resolve(__dirname, 'src')), ...['package.json', 'package-lock.json', 'LICENSE', 'vite.userscript.config.ts'].map(file => resolve(__dirname, file))]
+  .map(file => ({ file, name: relative(__dirname, file).split(sep).join('/') }))
+  .sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
+const fingerprint = createHash('sha256')
+for (const { file, name } of buildInputs) fingerprint.update(name).update('\0').update(readFileSync(file)).update('\0')
+const buildId = fingerprint.digest('hex').slice(0, 12)
 
 // UserScript 元数据头的唯一来源
 const metadata = `// ==UserScript==
@@ -12,7 +22,8 @@ const metadata = `// ==UserScript==
 // @version      ${version}
 // @author       wowayou
 // @license      ${license}
-// @description  只读：成语接龙进度与分支、长帖重复提问（linux.do / meta.discourse.org）
+// @description  Read-only Discourse companion: word chains, repeated questions and related replies. Local analysis; no posting.
+// @description:zh-CN  只读 Discourse 阅读助手：成语接龙、重复提问与相关回复，本地分析，不代发帖。
 // @match        https://linux.do/t/*
 // @match        https://meta.discourse.org/t/*
 // @grant        none
@@ -21,6 +32,8 @@ const metadata = `// ==UserScript==
 // @homepageURL  https://github.com/wowayou/threadmap-panel
 // @supportURL   https://github.com/wowayou/threadmap-panel/issues
 // ==/UserScript==
+//
+// 构建标识：${buildId}（源码与构建配置 SHA-256 的前 12 位，用于核对版本，不是签名）
 //
 // ThreadMap 由 wowayou 编写，代码以 MIT 许可发布（不含下述 CC BY-SA 4.0 读音数据）。
 // 灵感来自 linux.do 的成语接龙主题：https://linux.do/t/topic/2915068
@@ -51,6 +64,7 @@ ${codeLicense}
 `
 
 export default defineConfig({
+  define: { __THREADMAP_BUILD__: JSON.stringify({ version, id: buildId, packaged: true }) },
   plugins: [{
     name: 'threadmap-userscript-metadata',
     generateBundle(_options, bundle) {

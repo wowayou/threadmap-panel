@@ -1,12 +1,13 @@
 import { h } from 'preact'
 import { useLayoutEffect } from 'preact/hooks'
-import type { ChainResult } from '../core/chain'
-import type { QaResult } from '../core/questions'
+import type { TopicAnalysis } from '../core/analysis'
 import type { Prefs } from '../core/storage'
+import { useI18n } from './I18n'
 import { useDockDrag } from './useDockDrag'
 
-/** 收起状态的贴边按钮：显示“现在该接”的字和问题数；可拖到另一侧（docs/ui-spec.md §3） */
-export function EdgeTab({ chain, qa, dock, focus, onFocused, onOpen, onDock }: { chain: ChainResult; qa: QaResult | null; dock: Prefs['dock']; focus: boolean; onFocused: () => void; onOpen: () => void; onDock: (dock: Prefs['dock']) => void }) {
+/** 收起状态的贴边按钮：只显示当前模式的读数；可拖到另一侧（docs/ui-spec.md §3） */
+export function EdgeTab({ analysis, dock, focus, onFocused, onOpen, onDock }: { analysis: TopicAnalysis; dock: Prefs['dock']; focus: boolean; onFocused: () => void; onOpen: () => void; onDock: (dock: Prefs['dock']) => void }) {
+  const { t } = useI18n()
   const { target, offset, dragStyle, guardClick, handlers } = useDockDrag(onDock)
   // 面板在同一次提交里变为 display:none，浏览器会在下一帧把焦点修正到 body：先在布局阶段聚焦，下一帧再确认一次
   useLayoutEffect(() => {
@@ -18,11 +19,12 @@ export function EdgeTab({ chain, qa, dock, focus, onFocused, onOpen, onDock }: {
     return () => cancelAnimationFrame(frame)
   }, [focus])
 
-  const next = qa ? '?' : chain.heads[0]?.last.value.slice(-1)
-  const issues = qa ? qa.repeated.length : chain.issues.length
+  const qa = analysis.mode === 'qa' ? analysis.result : null
+  const next = analysis.mode === 'chain' ? analysis.result.heads[0]?.last.value.slice(-1) : '?'
+  const issues = analysis.mode === 'qa' ? analysis.result.repeated.length : analysis.result.issues.length
   const label = qa
-    ? `展开 ThreadMap 面板${issues ? `，${issues} 个问题被重复问过` : ''}`
-    : `展开 ThreadMap 接龙面板${next ? `，现在该接“${next}”` : ''}${issues ? `，${issues} 个问题` : ''}`
+    ? t('edge.qa') + (issues ? t('edge.repeated', { count: issues }) : '')
+    : t('edge.chain') + (next ? t('edge.next', { char: next }) : '') + (issues ? t('edge.issues', { count: issues }) : '')
 
   return <button
     ref={el => { target.current = el }}
@@ -32,7 +34,7 @@ export function EdgeTab({ chain, qa, dock, focus, onFocused, onOpen, onDock }: {
     data-drag-handle
     data-dragging={offset ? 'true' : undefined}
     aria-label={label}
-    title="ThreadMap · 拖动可换到另一侧"
+    title={t('edge.drag')}
     style={{ '--tm-edge-ratio': String(dock.ratio), ...dragStyle }}
     {...handlers}
     onClick={guardClick(onOpen)}

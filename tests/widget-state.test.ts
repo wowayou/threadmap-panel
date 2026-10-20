@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { initialUi, uiReducer, type UiState } from '../src/ui/widget-state'
+import { initialUi, initialWorkspace, uiReducer, viewUi, workspaceReducer, type UiState } from '../src/ui/widget-state'
 
 /** 逐条对应 docs/ui-spec.md §4 的状态表 */
 const at = (patch: Partial<UiState>): UiState => ({ ...initialUi(), ...patch })
@@ -69,5 +69,28 @@ describe('面板状态机', () => {
     expect(uiReducer(state, { type: 'setTab', tab: 'issues' })).toBe(state)
     expect(uiReducer(state, { type: 'select', id: 4 })).toBe(state)
     expect(uiReducer(state, { type: 'focusDone' })).toBe(state)
+  })
+})
+
+describe('模式隔离的工作区状态', () => {
+  it('窗口模式共用，标签和选中项分别保存', () => {
+    let state = workspaceReducer(initialWorkspace('open'), { tool: 'chain', event: { type: 'select', id: 7 } })
+    state = workspaceReducer(state, { tool: 'chain', event: { type: 'setTab', tab: 'issues' } })
+    state = workspaceReducer(state, { tool: 'qa', event: { type: 'select', id: 11 } })
+    expect(viewUi(state, 'chain')).toMatchObject({ mode: 'open', tab: 'issues', selected: 7 })
+    expect(viewUi(state, 'qa')).toMatchObject({ mode: 'open', tab: 'qa', selected: 11 })
+    state = workspaceReducer(state, { tool: 'qa', event: { type: 'collapse' } })
+    expect(viewUi(state, 'chain').mode).toBe('collapsed')
+    expect(viewUi(state, 'chain').selected).toBe(7)
+  })
+
+  it('拒绝切到另一模式的专属标签；详情默认打开当前模式的首页', () => {
+    const start = initialWorkspace('open')
+    expect(workspaceReducer(start, { tool: 'qa', event: { type: 'setTab', tab: 'issues' } })).toBe(start)
+    expect(workspaceReducer(start, { tool: 'chain', event: { type: 'setTab', tab: 'qa' } })).toBe(start)
+    expect(viewUi(workspaceReducer(start, { tool: 'qa', event: { type: 'showPost', id: 3 } }), 'qa')).toMatchObject({ tab: 'qa', selected: 3, focus: 'detail' })
+    expect(viewUi(workspaceReducer(start, { tool: 'chain', event: { type: 'showPost', id: 4 } }), 'chain')).toMatchObject({ tab: 'chain', selected: 4 })
+    const unchanged = workspaceReducer(start, { tool: 'chain', event: { type: 'focusDone' } })
+    expect(unchanged).toBe(start)
   })
 })

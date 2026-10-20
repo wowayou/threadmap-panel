@@ -1,3 +1,4 @@
+import { formatText, i18n, message, type Locale, type Message, type Text } from '../i18n'
 import { extractPhrases } from './phrases'
 import type { Evidence, Override, Phrase, Post, Reading } from './types'
 
@@ -39,17 +40,20 @@ export interface ChainVerdict {
   skipped: number
   /** 父楼与本楼之间未载入的楼数（可能藏着更近的父楼） */
   missingBetween: number
-  /** 同一父楼下更早的承接者（分叉） */
-  siblingIds: number[]
+  /**
+   * 同一父楼下更早的承接者（分叉）数量。它们就是 childrenOf.get(parentId) 的前 siblingCount 项；
+   * 不再每楼复制一份兄弟数组，避免同父楼高分叉时 n² 的内存（见 siblingsOf）。
+   */
+  siblingCount: number
   /** 证据同样强、但未被选中的其他候选 */
   alternativeIds: number[]
   /** 词组在更早楼层出现过：最早的楼层号（本楼内重复时等于本楼） */
   repeatOf?: number
   innerBreaks: { previous: string; current: string; status: 'break' | 'ambiguous' }[]
-  reason: string
+  reason: Message[]
 }
 
-export interface ChainIssue { kind: IssueKind; postId: number; postNumber: number; text: string }
+export interface ChainIssue { kind: IssueKind; postId: number; postNumber: number; text: Message[] }
 
 /** 主题的已知楼层范围：stream 是平台给出的完整帖子 ID 顺序（可能比已载入的多） */
 export interface TopicScope { stream?: number[]; totalCount?: number }
@@ -75,11 +79,20 @@ export interface ChainResult {
 
 /** 回溯时每个读音最多检查的更早帖子数，保证最坏情况下也有界 */
 const BACKTRACK_SCAN = 3000
+/** 分叉理由里列出的兄弟楼上限；完整数量始终写明，详情可逐楼查看 */
+const REASON_SIBLINGS = 5
+
+/** 某个分叉楼之前已接同一父楼的楼（楼层序），最多取 limit 个 */
+export function siblingsOf(verdict: ChainVerdict, chain: Pick<ChainResult, 'childrenOf'>, limit = Infinity): number[] {
+  if (verdict.parentId === null || !verdict.siblingCount) return []
+  return (chain.childrenOf.get(verdict.parentId) || []).slice(0, Math.min(verdict.siblingCount, limit))
+}
 
 const rank: Record<Evidence, number> = { 'same-word': 3, 'same-sound-tone': 2, 'same-sound-different-tone': 1 }
 
-export function evidenceLabel(evidence?: Evidence): string {
-  return evidence === 'same-word' ? '同字' : evidence === 'same-sound-tone' ? '同音同调' : evidence === 'same-sound-different-tone' ? '同音异调' : ''
+const evidenceMessage = (evidence: Evidence) => message(evidence === 'same-word' ? 'chain.sameWord' : evidence === 'same-sound-tone' ? 'chain.sameTone' : 'chain.differentTone')
+export function evidenceLabel(evidence?: Evidence, locale: Locale = 'zh-CN'): string {
+  return evidence ? formatText(locale, evidenceMessage(evidence)) : ''
 }
 
 export interface LinkCheck { evidence: Evidence; uncertain: boolean }
@@ -115,7 +128,7 @@ function gapCounter(sorted: Post[], scope: TopicScope) {
     }
   }
   // 没有 stream 时只能用楼层号估计：楼层号不连续可能是未载入，也可能是已删除
-  const last = sorted.at(-1)?.postNumber ?? 0
+  const last = sorted[sorted.length - 1]?.postNumber ?? 0
   const numbers = sorted.map(post => post.postNumber)
   const lowerBound = (x: number) => { let lo = 0, hi = numbers.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (numbers[mid] < x) lo = mid + 1; else hi = mid } return lo }
   return {
@@ -151,7 +164,7 @@ export function buildChain(posts: Post[], settings: ChainSettings = defaultChain
     const phrases = extractPhrases(post.text)
     if (!phrases.length) continue
     const first = phrases[0], last = phrases[phrases.length - 1]
-    const verdict: ChainVerdict = { seq: 0, postId: post.id, postNumber: post.postNumber, status: 'start', phrases, first, last, parentId: null, viaReply: false, skipped: 0, missingBetween: 0, siblingIds: [], alternativeIds: [], innerBreaks: [], reason: '' }
+    const verdict: ChainVerdict = { seq: 0, postId: post.id, postNumber: post.postNumber, status: 'start', phrases, first, last, parentId: null, viaReply: false, skipped: 0, missingBetween: 0, siblingCount: 0, alternativeIds: [], innerBreaks: [], reason: [] }
 
     for (let i = 1; i < phrases.length; i++) {
       const link = checkLink(phrases[i - 1], phrases[i], settings)
@@ -184,22 +197,22 @@ export function buildChain(posts: Post[], settings: ChainSettings = defaultChain
 
     const override = overrideFor.get(`${post.origin || 'demo'}:${post.topicId || 0}:${post.id}`)
     if (override) {
-      if (override.parentId === null) { verdict.status = 'excluded'; verdict.reason = '本地标记：不算接龙'; adopt(null); continue }
+      if (override.parentId === null) { verdict.status = 'excluded'; verdict.reason = [message('reason.excluded')]; adopt(null); continue }
       const parent = verdicts.get(override.parentId)
       if (parent && parent.status !== 'excluded' && parent.postNumber < post.postNumber) {
         verdict.status = 'manual'
         verdict.skipped = active.length - 1 - activeIndex.get(parent.postId)!
-        verdict.siblingIds = [...(childrenOf.get(parent.postId) || [])]
-        verdict.reason = `本地指定：接 #${parent.postNumber}`
+        verdict.siblingCount = childrenOf.get(parent.postId)?.length ?? 0
+        verdict.reason = [message('reason.manual', { number: parent.postNumber })]
         adopt(parent); continue
       }
-      verdict.reason = '本地指定已失效（父楼不存在、已排除或晚于本楼），已按自动规则判断。'
+      verdict.reason.push(message('reason.staleOverride'))
     }
 
     if (!active.length) {
       const before = gaps.between(null, post)
       verdict.status = before ? 'unknown' : 'start'
-      verdict.reason += before ? `前面还有 ${before} 楼未载入，无法判断它接的是谁。` : '本帖第一个接龙。'
+      verdict.reason.push(before ? message('reason.missingBefore', { count: before }) : message('reason.start'))
       adopt(null); continue
     }
 
@@ -260,10 +273,10 @@ export function buildChain(posts: Post[], settings: ChainSettings = defaultChain
       const previous = active[active.length - 1]
       if (missingInWindow) {
         verdict.status = 'unknown'
-        verdict.reason += `最近的接龙帖接不上，但中间有 ${missingInWindow} 楼未载入，可能接的是其中一楼。`
+        verdict.reason.push(message('reason.missingWindow', { count: missingInWindow }))
       } else {
         verdict.status = 'break'
-        verdict.reason += `「${first.value}」接不上最近的链头（上一个接龙是 #${previous.postNumber}「${previous.last.value}」）。`
+        verdict.reason.push(message('reason.break', { phrase: first.value, number: previous.postNumber, previous: previous.last.value }))
       }
       adopt(null); continue
     }
@@ -271,29 +284,35 @@ export function buildChain(posts: Post[], settings: ChainSettings = defaultChain
     const parent = chosen.parent
     verdict.skipped = active.length - 1 - activeIndex.get(parent.postId)!
     verdict.missingBetween = gaps.between(postOf(parent), post)
-    verdict.siblingIds = [...(childrenOf.get(parent.postId) || [])]
+    const earlierChildren = childrenOf.get(parent.postId) || []
+    verdict.siblingCount = earlierChildren.length
     verdict.alternativeIds = alternatives.map(c => c.parent.postId)
     verdict.evidence = chosen.link.evidence
     const uncertain = chosen.link.uncertain && chosen.link.evidence !== 'same-word'
-    verdict.status = uncertain ? 'pending' : backtrack ? 'backtrack' : verdict.siblingIds.length ? 'fork' : 'continue'
-    const core = `${evidenceLabel(chosen.link.evidence)}接 #${parent.postNumber}「${parent.last.value}」${verdict.viaReply ? '（平台回复指向该楼）' : ''}`
-    verdict.reason += verdict.status === 'pending' ? `${core}，但依赖多音字的读音，待确认。`
-      : verdict.status === 'backtrack' ? `${core}，越过了 ${verdict.skipped} 个接龙帖。`
-      : verdict.status === 'fork' ? `${core}，与 ${verdict.siblingIds.map(id => '#' + verdicts.get(id)?.postNumber).join('、')} 接了同一楼。`
-      : `${core}。`
-    if (verdict.missingBetween) verdict.reason += `中间有 ${verdict.missingBetween} 楼未载入。`
+    verdict.status = uncertain ? 'pending' : backtrack ? 'backtrack' : verdict.siblingCount ? 'fork' : 'continue'
+    const link = message('reason.link', { evidence: evidenceMessage(chosen.link.evidence), number: parent.postNumber, phrase: parent.last.value, reply: verdict.viaReply ? message('reason.reply') : '' })
+    let siblings: Text = ''
+    if (verdict.status === 'fork') {
+      const list = earlierChildren.slice(0, REASON_SIBLINGS).map(id => '#' + verdicts.get(id)?.postNumber).join(', ')
+      siblings = verdict.siblingCount > REASON_SIBLINGS ? message('reason.siblingsMore', { list, count: verdict.siblingCount }) : list
+    }
+    verdict.reason.push(verdict.status === 'pending' ? message('reason.pending', { link })
+      : verdict.status === 'backtrack' ? message('reason.backtrack', { link, count: verdict.skipped })
+      : verdict.status === 'fork' ? message('reason.fork', { link, siblings })
+      : message('reason.continue', { link }))
+    if (verdict.missingBetween) verdict.reason.push(message('reason.missingBetween', { count: verdict.missingBetween }))
     adopt(parent)
   }
 
   const heads = active.filter(v => !childrenOf.has(v.postId)).reverse()
   const issues: ChainIssue[] = []
   for (const v of order) {
-    const push = (kind: IssueKind, text: string) => issues.push({ kind, postId: v.postId, postNumber: v.postNumber, text })
+    const push = (kind: IssueKind, text: Message[]) => issues.push({ kind, postId: v.postId, postNumber: v.postNumber, text })
     if (v.status === 'break' || v.status === 'fork' || v.status === 'pending' || v.status === 'backtrack') push(v.status, v.reason)
-    if (v.repeatOf !== undefined) push('repeat', v.repeatOf === v.postNumber ? '本楼内出现重复词组。' : `词组在 #${v.repeatOf} 用过。`)
-    v.innerBreaks.forEach(b => push('inner', `帖内「${b.previous}」→「${b.current}」${b.status === 'break' ? '接不上' : '依赖多音字，待确认'}。`))
+    if (v.repeatOf !== undefined) push('repeat', [v.repeatOf === v.postNumber ? message('reason.repeatHere') : message('reason.repeat', { number: v.repeatOf })])
+    v.innerBreaks.forEach(b => push('inner', [message('reason.inner', { previous: b.previous, current: b.current, result: message(b.status === 'break' ? 'chain.cannotLink' : 'reason.ambiguous') })]))
   }
-  const lastPost = sorted.at(-1) ?? null
+  const lastPost = sorted[sorted.length - 1] ?? null
   return {
     verdicts, order, childrenOf, heads, issues,
     gamePosts: order.length,
@@ -321,22 +340,23 @@ export function looksLikeChainTopic(chain: ChainResult) {
 export type BadgeTone = 'ok' | 'warn' | 'bad' | 'muted'
 export interface Badge { icon: string; label: string; tone: BadgeTone; title: string }
 
-export function badgeFor(verdict: ChainVerdict, chain: ChainResult): Badge {
-  const parent = verdict.parentId === null ? undefined : chain.verdicts.get(verdict.parentId)?.postNumber
-  const skip = verdict.skipped > 0 && verdict.status !== 'backtrack' ? ` · 隔 ${verdict.skipped} 楼` : ''
-  const extra = verdict.repeatOf !== undefined ? ' · 重复' : verdict.innerBreaks.some(b => b.status === 'break') ? ' · 帖内断' : ''
+export function badgeFor(verdict: ChainVerdict, chain: ChainResult, locale: Locale = 'zh-CN'): Badge {
+  const { t, format } = i18n(locale)
+  const number = verdict.parentId === null ? '?' : chain.verdicts.get(verdict.parentId)?.postNumber ?? '?'
+  const skip = verdict.skipped > 0 && verdict.status !== 'backtrack' ? t('chainBadge.skip', { count: verdict.skipped }) : ''
+  const extra = verdict.repeatOf !== undefined ? t('chainBadge.repeat') : verdict.innerBreaks.some(b => b.status === 'break') ? t('chainBadge.inner') : ''
   const okTone: BadgeTone = extra ? 'warn' : 'ok'
-  const ev = evidenceLabel(verdict.evidence)
-  const title = verdict.reason
+  const evidence = evidenceLabel(verdict.evidence, locale)
+  const title = format(verdict.reason)
   switch (verdict.status) {
-    case 'start': return { icon: '●', label: `开局${extra}`, tone: okTone, title }
-    case 'continue': return { icon: '✓', label: `接 #${parent} · ${ev}${skip}${extra}`, tone: okTone, title }
-    case 'manual': return { icon: '✓', label: `接 #${parent} · 本地指定${extra}`, tone: okTone, title }
-    case 'fork': return { icon: '⑂', label: `分叉 · 接 #${parent}${extra}`, tone: 'warn', title }
-    case 'backtrack': return { icon: '↶', label: `回溯接 #${parent}${extra}`, tone: 'warn', title }
-    case 'pending': return { icon: '?', label: `可能接 #${parent} · 多音待确认${extra}`, tone: 'warn', title }
-    case 'break': return { icon: '✕', label: `断链${extra}`, tone: 'bad', title }
-    case 'unknown': return { icon: '…', label: `前文未载入${extra}`, tone: 'muted', title }
-    case 'excluded': return { icon: '–', label: '已排除', tone: 'muted', title }
+    case 'start': return { icon: '●', label: t('chainBadge.start', { extra }), tone: okTone, title }
+    case 'continue': return { icon: '✓', label: t('chainBadge.continue', { number, evidence, skip, extra }), tone: okTone, title }
+    case 'manual': return { icon: '✓', label: t('chainBadge.manual', { number, extra }), tone: okTone, title }
+    case 'fork': return { icon: '⑂', label: t('chainBadge.fork', { number, extra }), tone: 'warn', title }
+    case 'backtrack': return { icon: '↶', label: t('chainBadge.backtrack', { number, extra }), tone: 'warn', title }
+    case 'pending': return { icon: '?', label: t('chainBadge.pending', { number, extra }), tone: 'warn', title }
+    case 'break': return { icon: '✕', label: t('chainBadge.break', { extra }), tone: 'bad', title }
+    case 'unknown': return { icon: '…', label: t('chainBadge.unknown', { extra }), tone: 'muted', title }
+    case 'excluded': return { icon: '–', label: t('chainBadge.excluded'), tone: 'muted', title }
   }
 }

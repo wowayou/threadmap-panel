@@ -1,3 +1,5 @@
+import type { ToolMode } from '../core/analysis'
+
 /**
  * 面板交互状态机（纯函数）。每条转换对应 docs/ui-spec.md 第 4 节的表格，
  * 由 tests/widget-state.test.ts 覆盖。组件只派发事件，不自行决定状态。
@@ -56,4 +58,22 @@ export function uiReducer(state: UiState, event: UiEvent): UiState {
     case 'focusDone':
       return state.focus === null ? state : { ...state, focus: null }
   }
+}
+
+/** 窗口模式/焦点共用，业务标签与选中项隔离；复用原窗口状态机而非复制转换逻辑。 */
+export interface WorkspaceUi {
+  mode: Mode
+  focus: FocusTarget
+  views: Record<ToolMode, Pick<UiState, 'tab' | 'selected'>>
+}
+export const initialWorkspace = (mode: Mode = 'collapsed'): WorkspaceUi => ({ mode, focus: null, views: { chain: { tab: 'chain', selected: null }, qa: { tab: 'qa', selected: null } } })
+export const viewUi = (state: WorkspaceUi, tool: ToolMode): UiState => ({ mode: state.mode, focus: state.focus, ...state.views[tool] })
+export function workspaceReducer(state: WorkspaceUi, action: { tool: ToolMode; event: UiEvent }): WorkspaceUi {
+  const { tool } = action
+  const event = action.event.type === 'showPost' && action.event.tab === undefined ? { ...action.event, tab: tool } : action.event
+  if ('tab' in event && event.tab !== undefined && event.tab !== 'rules' && (tool === 'qa' ? event.tab !== 'qa' : event.tab !== 'chain' && event.tab !== 'issues')) return state
+  const current = viewUi(state, tool), next = uiReducer(current, event)
+  if (next === current) return state
+  const paneChanged = next.tab !== current.tab || next.selected !== current.selected
+  return { mode: next.mode, focus: next.focus, views: paneChanged ? { ...state.views, [tool]: { tab: next.tab, selected: next.selected } } : state.views }
 }
